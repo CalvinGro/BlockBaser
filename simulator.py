@@ -1,93 +1,101 @@
-# simulator.py
 import numpy as np
 
 class BlockSimulator:
     def __init__(self, width=12, length_short=14, length_long=16):
-        # Dimensions in inches (convert to mm internally for consistency)
-        self.width = width * 25.4  # mm
-        self.length_short = length_short * 25.4  # mm
-        self.length_long = length_long * 25.4  # mm
-        
-        # Trapezoid geometry: bottom (A-B) is short side, top (D-C) is long side
-        # For simplicity, assume linear taper - average length for center
+        # Dimensions in inches → mm
+        self.width = width * 25.4
+        self.length_short = length_short * 25.4
+        self.length_long = length_long * 25.4
+
         self.length_avg = (self.length_short + self.length_long) / 2
         self.width_half = self.width / 2
-        
-        # Corner positions (mm) - trapezoid with A-B at bottom (short), D-C at top (long)
-        # Place centered at origin
-        self.corners = {
-            0: np.array([-self.length_short/2, -self.width_half]),  # A (bottom-left)
-            1: np.array([self.length_short/2, -self.width_half]),   # B (bottom-right)
-            2: np.array([self.length_long/2, self.width_half]),     # C (top-right)
-            3: np.array([-self.length_long/2, self.width_half])     # D (top-left)
-        }
-        
-        # Random initial corner heights (mm), reasonable misalignment: -10 to 10 mm
-        self.z = np.random.uniform(-1, 30, 4)  # [z_A, z_B, z_C, z_D]
-        
-        # Stiffness factor: blow lowers by 0-5 mm per unit power, with noise
-        self.k = 5.0  # max lowering per unit power
-        self.noise_scale = 0.2  # 20% variability
-        
-        # Assume adjacent block at z=0, laser measures average "effective height offset"
-        # Positive h: current block higher than adjacent (needs lowering)
+
+        # Corner coordinates (x, y)
+        self.corners = [
+            np.array([-self.length_short/2, -self.width_half]),  # A
+            np.array([self.length_short/2, -self.width_half]),   # B
+            np.array([self.length_long/2, self.width_half]),     # C
+            np.array([-self.length_long/2, self.width_half])     # D
+        ]
+
+        # Random tilt ±5 degrees
+        self.theta_x = np.radians(np.random.uniform(-5, 5))
+        self.theta_y = np.radians(np.random.uniform(-5, 5))
+
+        # Laser sensors (3 along bottom edge)
+        self.laser_positions = [
+            np.array([-self.length_short/4, -self.width_half]),
+            np.array([0, -self.width_half]),
+            np.array([self.length_short/4, -self.width_half])
+        ]
+        self.laser_offsets = np.random.uniform(-2, 2, 3)
+
+        # Random laser readings 5–25 mm
+        self.laser_readings = np.random.uniform(10, 25, 3)
+
+        # Compute corner heights from tilt + bottom-center laser
+        center_laser_height = self.laser_readings[1]
+        self.z = np.zeros(4)
+        for i, (x, y) in enumerate(self.corners):
+            self.z[i] = center_laser_height + self.theta_x * y - self.theta_y * x
+
+        # Actuation parameters
+        self.k = 5.0
+        self.noise_scale = 0.2
+
+        print(f"Initial tilt X: {np.degrees(self.theta_x):.2f}°, Y: {np.degrees(self.theta_y):.2f}°")
+        print(f"Laser readings: {self.laser_readings}")
+        print(f"Initial corner heights: {self.z}")
 
     def actuate_piston(self, corner_id, power):
         if power <= 0:
             return
-        # Lower the corner: delta_z = -power * k * (1 + noise)
         noise = np.random.uniform(-self.noise_scale, self.noise_scale)
         delta_z = -power * self.k * (1 + noise)
         self.z[corner_id] += delta_z
 
     def get_level(self):
-        # Compute tilts (radians, small angle) for trapezoid
-        # Use vector approach: fit plane to 4 points and find normal
-        
-        # Corner positions and heights
-        points = [self.corners[i] + np.array([0, 0, self.z[i]]) for i in range(4)]
-        
-        # Fit plane: z = ax + by + c using least squares
-        # Design matrix A: [x, y, 1] for each point
-        A = np.array([[p[0], p[1], 1] for p in points[:3]])  # Use 3 points
-        b = np.array([p[2] for p in points[:3]])
-        
-        # Solve for plane coefficients
-        try:
-            coeffs, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
-            a, b, c = coeffs
-        except:
-            # Fallback if singular: use simple average slopes
-            # theta_y (around x): average slope along length direction
-            theta_y = ( (self.z[1] - self.z[0]) / self.length_short + 
-                       (self.z[2] - self.z[3]) / self.length_long ) / 2
-            # theta_x (around y): average slope along width direction
-            theta_x = ( (self.z[3] - self.z[0] + self.z[2] - self.z[1]) / 
-                       (2 * self.width) )
-            return theta_x, theta_y
-        
-        # Convert plane coefficients to angles (small angle approximation)
-        theta_x = np.arctan(-b)  # Rotation around y-axis
-        theta_y = np.arctan(a)   # Rotation around x-axis
-        
+        points = np.array([np.append(c, z) for c, z in zip(self.corners, self.z)])
+        X = points[:, :2]
+        X = np.c_[X, np.ones(4)]
+        Y = points[:, 2]
+        coeffs, _, _, _ = np.linalg.lstsq(X, Y, rcond=None)
+        a, b, _ = coeffs
+        theta_x = np.arctan(-b)
+        theta_y = np.arctan(a)
         return theta_x, theta_y
 
-    def get_height(self):
-        # Simulate fused laser: weighted average z based on trapezoid geometry
-        # Weight by inverse distance from center for better "flush" representation
-        center = np.array([0, 0])
-        weights = 1 / (1 + np.linalg.norm([self.corners[i][:2] for i in range(4)], axis=1))
-        h_weighted = np.average(self.z, weights=weights)
-        
-        # Add small measurement noise ~0.5 mm std dev
-        noise = np.random.normal(0, 0.5)
-        return h_weighted + noise
+    def interpolate_height(self, x, y):
+        x = np.clip(x, -self.length_avg/2, self.length_avg/2)
+        y = np.clip(y, -self.width_half, self.width_half)
 
-# Usage example:
-# sim = BlockSimulator(width=12, length_short=14, length_long=16)
-# print("Corner positions:", sim.corners)
-# print("Initial heights:", sim.z)
-# print("Level:", sim.get_level())
-# print("Height:", sim.get_height())
-# sim.actuate_piston(0, 0.5)
-# print("After actuation:", sim.z)
+        if abs(y + self.width_half) < 1:  # bottom
+            t = (x + self.length_short/2) / self.length_short
+            return (1-t)*self.z[0] + t*self.z[1]
+        elif abs(y - self.width_half) < 1:  # top
+            t = (x + self.length_long/2) / self.length_long
+            return (1-t)*self.z[3] + t*self.z[2]
+        else:
+            return np.mean(self.z)
+
+    def get_height(self):
+        readings = []
+        for i, pos in enumerate(self.laser_positions):
+            x, y = pos
+            h = self.interpolate_height(x, y) + self.laser_offsets[i]
+            h += np.random.normal(0, 1.5)
+            readings.append(h)
+        fused = np.mean(readings) + np.random.normal(0, 0.3)
+        print(f"  Laser readings: {[f'{r:.2f}' for r in readings]} -> fused: {fused:.2f}mm")
+        return fused
+
+    def get_corner_status(self):
+        status = []
+        for i, z in enumerate(self.z):
+            if z > 2.0:
+                status.append(f"Corner {i} ({z:+.1f}mm): TOO HIGH")
+            elif z < -2.0:
+                status.append(f"Corner {i} ({z:+.1f}mm): TOO LOW")
+            else:
+                status.append(f"Corner {i} ({z:+.1f}mm): OK")
+        return status
