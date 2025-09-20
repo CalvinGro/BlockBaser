@@ -23,7 +23,7 @@ class BlockSimulator:
         }
         
         # Random initial corner heights (mm), reasonable misalignment: -10 to 10 mm
-        self.z = np.random.uniform(-10, 10, 4)  # [z_A, z_B, z_C, z_D]
+        self.z = np.random.uniform(-1, 30, 4)  # [z_A, z_B, z_C, z_D]
         
         # Stiffness factor: blow lowers by 0-5 mm per unit power, with noise
         self.k = 5.0  # max lowering per unit power
